@@ -2,7 +2,8 @@ from transformers import VisionEncoderDecoderModel, ViTFeatureExtractor, AutoTok
 from transformers import pipeline
 import torch
 import numpy as np
-from PIL import Image
+import copy
+from PIL import Image, ImageDraw
 import cv2
 import os
 
@@ -118,17 +119,21 @@ def is_patch_within_mask(original_img_mask, patch_coord, mask_threshold=.70):
 
     return perc_mask_pixels > mask_threshold, patch_with_mask
 
-def find_original_img_patch(vit_patch:int, original_img, grid_size:int=14, patch_size:int=16):
+def find_original_img_patch(vit_patch:int, original_img:Image=None, grid_size:int=14, patch_size:int=16):
 #     h_p, w_p = vit_patch
-#     projection = original_img[h_p * patch_size:(h_p * patch_size)+patch_size, w_p * patch_size:(w_p * patch_size)+patch_size]
+#     projected_patch = original_img[h_p * patch_size:(h_p * patch_size)+patch_size, w_p * patch_size:(w_p * patch_size)+patch_size]
     col_p = vit_patch // grid_size
     row_p = vit_patch - (col_p * grid_size)
     y = row_p * patch_size
     width = patch_size
     x = col_p * patch_size
     height = patch_size
-    projection = original_img[x:x+width, y:y+height]
-    return projection, (x, x+width, y, y+height)
+
+    projected_patch = None
+    if original_img is not None:
+        projected_patch = original_img[x:x+width, y:y+height]
+
+    return (x, x+width, y, y+height), projected_patch
 
 def xy_coord_token(token, grid_size=14):
     y = token // grid_size
@@ -143,13 +148,51 @@ def find_mask_tokens(img, mask, mask_threshold, n_tokens = 196):
     mask_patches = np.zeros((n_tokens), dtype="bool")
     mask_tokens = []
     for patch_i in range(n_tokens):
-        img_patch, coord = find_original_img_patch(patch_i, img)
+        coord, img_patch = find_original_img_patch(vit_patch=patch_i, original_img=img)
         mask_patches[patch_i] = is_patch_within_mask(mask, coord, mask_threshold)[0]
         if mask_patches[patch_i]:
             mask_tokens.append(patch_i)
         img_patches.append(img_patch)
         
     return mask_tokens, mask_patches, img_patches    
-    
 
+def create_fg_mask(img_size, annotation) -> Image:
+    pil_mask = np.zeros(shape=img_size, dtype=np.uint8)
+    pil_mask = Image.fromarray(np.moveaxis(pil_mask, 0, -1))
+    img_draw = ImageDraw.Draw(pil_mask)     
+    for segm in annotation['segmentation']:
+        if isinstance(segm, list):
+            img_draw.polygon(segm, fill ="#ffffff")
     
+    return pil_mask
+
+def pre_process_mask(mask: Image, new_size=(224,224))-> np.ndarray:    
+    fg_mask_img = copy.deepcopy(np.array(mask.resize(new_size)))
+    # make it binary 255/0
+    fg_mask_img[fg_mask_img!=255] = 0
+    fg_mask_img = fg_mask_img[:,:,np.newaxis]
+    
+    return fg_mask_img
+
+# orders object instances by attention.
+# TODO: improve function name, not very descriptive 
+def order_obj_instances(img: Image, category_id:int, image_annotations, layer_attention_map):
+    obj_instance_attention = {}
+    
+    object_annotations = [ann for ann in image_annotations['annotations']['annotations'] if ann['iscrowd']==0 and ann['category_id']==category_id]
+    for idx, ann in enumerate(object_annotations):
+        mask = create_fg_mask(img.size, ann)
+        mask = pre_process_mask(mask)
+        mask_patches = find_mask_tokens(np.array(img.resize((224,224))), mask, .05)[1]
+        
+        obj_att_map = copy.deepcopy(layer_attention_map)
+        # put into [0, 1] scale
+        obj_att_map = obj_att_map / obj_att_map.max()
+        # mask background
+        obj_att_map[~mask_patches] = 0.0        
+        max_attention = np.max(obj_att_map)        
+        obj_instance_attention[idx] = max_attention
+    
+    obj_instance_sorted = sorted(obj_instance_attention.items(), key=lambda x:x[1], reverse=True)
+    obj_instance_sorted = [(object_annotations[instance[0]],instance[1]) for instance in obj_instance_sorted]
+    return obj_instance_sorted       
