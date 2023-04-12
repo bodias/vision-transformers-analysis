@@ -1,0 +1,6 @@
+sample_image_captioning/experiments/**
+sample_image_captioning/features/**
+sample_image_captioning/vit-gpt-model/
+sample_image_captioning/.ipynb_checkpoints/
+sample_image_captioning/__pycache__/
+.ipynb_checkpoints/
