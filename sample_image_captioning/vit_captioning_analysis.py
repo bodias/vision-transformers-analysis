@@ -34,7 +34,7 @@ class VITCaptioningModel():
         return model, feature_extractor, tokenizer
 
     #requires more inputs
-    def forward_pass(self, img: Image):
+    def forward_pass(self, imgs:list):
         # text preprocessing step
         def tokenization_fn(captions, max_target_length):
             """Run tokenization on captions."""
@@ -44,13 +44,13 @@ class VITCaptioningModel():
 
             return labels
 
-        pixel_values = self.feature_extractor(images=[img], return_tensors='pt').pixel_values
+        pixel_values = self.feature_extractor(images=imgs, return_tensors='pt').pixel_values
         pixel_values = pixel_values.to(self.device)
         ## Can we use without this input???
         ## it does not seem to affect the output of the attention maps. 
         labels = tokenization_fn("", 128)
         labels = labels.to(self.device)
-        outputs = self.model(pixel_values=pixel_values, labels=labels)
+        outputs = self.model(pixel_values=pixel_values, labels=torch.stack([labels.squeeze()] * len(imgs)))
         return outputs   
 
     def generate_caption(self,img: Image):
@@ -72,17 +72,16 @@ class VITCaptioningModel():
 
     
     def get_all_attention_maps(self, attentions, renorm_weights=True, output_as_matrix=True):
-        
-        att_map = torch.stack(attentions).squeeze(1)
-
+        '''
+        attentions: has to be ?
+        '''
         # Average the attention weights across all heads.
-        att_map = torch.mean(att_map, dim=1)
-        mean_att_map = att_map
+        mean_att_map = torch.mean(attentions, dim=2)
 
         # To account for residual connections, we add an identity matrix to the
         # attention matrix and re-normalize the weights.        
         if renorm_weights:
-            residual_att = torch.eye(mean_att_map.size(1))
+            residual_att = torch.eye(mean_att_map.size(2))
             aug_mean_map = mean_att_map + residual_att.to(self.device)
             aug_mean_map = aug_mean_map / aug_mean_map.sum(dim=-1).unsqueeze(-1)
             mean_att_map = aug_mean_map
@@ -90,6 +89,9 @@ class VITCaptioningModel():
         return mean_att_map
 
     def get_joint_attention_map(self, attentions, output_as_matrix=True):
+        '''
+        attentions: has to be ?
+        '''
         # preprocess attention maps
         aug_att_mat = self.get_all_attention_maps(attentions, renorm_weights=True)
 

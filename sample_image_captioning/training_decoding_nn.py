@@ -68,9 +68,35 @@ def prepare_dataset(dataset_folder, filter_caption=None):
     labels_to_idx = dict(zip(unique_labels, range(len(unique_labels))))
 
     features["labels"] = features['class'].apply(lambda x: labels_to_idx[x])
+    # for stratification based on labels + caption
+    features["labels_caption"] = features["class"].astype(str) + features["caption_filter"].astype(str)
     features = features.reset_index(drop=True)
 
     return features, unique_labels
+
+def dataset_split(features, testset_file=""):
+    if testset_file:
+        print(f"Loading testset from {testset_file}")
+        with open(testset_file, 'rb') as handle:
+            testset = pickle.load(handle) 
+        train_idx, train_labels = testset["train"]["data"], testset["train"]["labels"]
+        test_idx, test_labels = testset["test"]["data"], testset["test"]["labels"]
+    else: 
+        train_idx, test_idx, train_labels, test_labels = train_test_split(features.index.tolist(), 
+                                                                          features["labels"].tolist(), 
+                                                                          test_size=0.10, 
+                                                                          stratify=features["labels_caption"].tolist(),
+                                                                          random_state=42, 
+                                                                          shuffle=True)
+    # validation data
+    train_idx, val_idx, train_labels, val_labels = train_test_split(features.filter(items=train_idx, axis=0).index.tolist(), 
+                                                                    features.filter(items=train_idx, axis=0)["labels"].tolist(), 
+                                                                    test_size=0.10, 
+                                                                    stratify=features.filter(items=train_idx, axis=0)["labels_caption"].tolist(),
+                                                                    random_state=42, 
+                                                                    shuffle=True)   
+
+    return train_idx, val_idx, test_idx, train_labels, val_labels, test_labels
 
 def plot_training_curves(histories, filename):
     fig, axs = plt.subplots(nrows=len(histories), ncols=2, figsize=(8, 4*len(histories)))
@@ -132,12 +158,7 @@ def run_experiments(features,
                     models = ['NN'],
                     epochs = 60):
     
-    train_idx, test_idx, train_labels, test_labels = train_test_split(features.index.tolist(), 
-                                                                      labels, 
-                                                                      test_size=0.10, 
-                                                                      stratify=labels,
-                                                                      random_state=42,
-                                                                      shuffle=True)   
+    train_idx, val_idx, test_idx, train_labels, val_labels, test_labels = dataset_split(features)
     
     # create a cartesian product with all parameters
     params = list(product(token_strategies, layers, objects, models))
@@ -154,12 +175,15 @@ def run_experiments(features,
 
         if model=="NN":
             train_y = to_categorical(train_labels)
+            val_y = to_categorical(val_labels)
             test_y = to_categorical(test_labels)
         else:
             train_y = train_labels
+            val_y = val_labels
             test_y = test_labels
 
         train_x = features.filter(items=train_idx, axis=0)[f"{obj}_fg_tokens_act"].apply(lambda x: x[layer][strategy]).to_numpy()
+        val_x = features.filter(items=val_idx, axis=0)[f"{obj}_fg_tokens_act"].apply(lambda x: x[layer][strategy]).to_numpy()
         test_x = features.filter(items=test_idx, axis=0)[f"{obj}_fg_tokens_act"].apply(lambda x: x[layer][strategy]).to_numpy()
         
         clf_model = base_model(model, n_classes=len(set(labels)))
@@ -168,7 +192,7 @@ def run_experiments(features,
             es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=20, restore_best_weights=True)
             hist = clf_model.fit(tf.stack(train_x), 
                                  tf.stack(train_y), 
-                                 validation_split=0.10,
+                                 validation_data=(tf.stack(val_x),tf.stack(val_y)),
                                  epochs=epochs, 
                                  batch_size=128, 
                                  callbacks=[es],
@@ -213,11 +237,12 @@ if __name__ == "__main__":
     #                         exp_name=exp_name,
     #                         models=["NN","SVM"])
 
+    # dataset_folder = "features/features-mask-4-main_thr-0-sec_thr-0/"
     dataset_folder = "features_dining-table/features-mask-4-main_thr-0-sec_thr-0/"
-    # exp_name = f"exp_dining_{dataset_folder[18:-1]}"
+    # exp_name = f"exp_{dataset_folder[18:-1]}"
     exp_name = f"exp_dining_{dataset_folder[31:-1]}"
     os.makedirs(os.path.join(EXP_FOLDER, exp_name), exist_ok=True)
-    features, labels = prepare_dataset(dataset_folder,)
+    features, labels = prepare_dataset(dataset_folder)
     run_experiments(features=features, 
                     labels=features["labels"], 
                     unique_label_names = labels,     
