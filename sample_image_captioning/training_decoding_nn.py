@@ -30,9 +30,9 @@ def base_model(model="NN", n_classes = 5):
         clf_model.add(Dropout(0.5))
         clf_model.add(Dense(n_classes))
         clf_model.add(Activation("softmax"))
-    #     sgd = SGD(lr=0.001)
-        adam = Adam()
-        clf_model.compile(loss="categorical_crossentropy", optimizer=adam, metrics=["accuracy"])        
+        sgd = SGD(learning_rate=0.0001, momentum=0.9, nesterov=True)
+        # adam = Adam()
+        clf_model.compile(loss="categorical_crossentropy", optimizer=sgd, metrics=["accuracy"])        
     else:
         clf_model = svm.SVC(kernel='linear') # Linear Kernel
     return clf_model
@@ -43,8 +43,17 @@ def prepare_dataset(dataset_folder, filter_caption=None):
     files = os.listdir(dataset_folder)
     features = pd.DataFrame()
     for file in files:
+        ## WORKAROUND 'feat-tokens_act-1-10.pickle'
+        if int(file[16])==1:
+            print(f"person dataset {file[16]}")
+            first_label = "person"
+        else:
+            print(f"car dataset {file[16]}")
+            first_label = "car"
+
         print(f"Processing file '{file}'")    
         obj_features = pd.read_pickle(os.path.join(dataset_folder, file))
+        obj_features["class"] = obj_features["class"].apply(lambda x: first_label+"-"+x)
         if filter_caption is not None:
             print(f"filter caption is on:{filter_caption}")
             obj_features = obj_features[obj_features["caption_filter"]==filter_caption]
@@ -158,6 +167,7 @@ def run_experiments(features,
                     models = ['NN'],
                     epochs = 60):
     
+    print(f"dataset size: {len(features)}")
     train_idx, val_idx, test_idx, train_labels, val_labels, test_labels = dataset_split(features)
     
     # create a cartesian product with all parameters
@@ -196,6 +206,8 @@ def run_experiments(features,
                                  epochs=epochs, 
                                  batch_size=128, 
                                  callbacks=[es],
+                                 workers=6,
+                                 use_multiprocessing=False,
                                  verbose=0)
             # save model
             clf_model.save(os.path.join(EXP_FOLDER, exp_name, f"model-l{layer}-o{obj}-s{strategy}"))
@@ -237,14 +249,16 @@ if __name__ == "__main__":
     #                         exp_name=exp_name,
     #                         models=["NN","SVM"])
 
-    # dataset_folder = "features/features-mask-4-main_thr-0-sec_thr-0/"
-    dataset_folder = "features_dining-table/features-mask-4-main_thr-0-sec_thr-0/"
-    # exp_name = f"exp_{dataset_folder[18:-1]}"
-    exp_name = f"exp_dining_{dataset_folder[31:-1]}"
+    dataset_folder = "feat_two_objects/features-mask-4-main_thr-0-sec_thr-0/"
+    # dataset_folder = "features_dining-table/features-mask-4-main_thr-0-sec_thr-0/"
+    exp_name = f"exp_full_{dataset_folder[26:-1]}_attn_filter"
+    # exp_name = f"exp_dining_{dataset_folder[31:-1]}_sgd2"
     os.makedirs(os.path.join(EXP_FOLDER, exp_name), exist_ok=True)
     features, labels = prepare_dataset(dataset_folder)
+    print(labels)
     run_experiments(features=features, 
                     labels=features["labels"], 
                     unique_label_names = labels,     
                     exp_name=exp_name,
+                    epochs=200,
                     models=["NN"])

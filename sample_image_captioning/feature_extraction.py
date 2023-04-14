@@ -98,7 +98,9 @@ def get_objects_mask(annotation, objects=[], option=1, attention_maps=None):
         elif option == 4:
             # this option produces 12 masks, one for each layer of the transformers encoder
             pil_mask = []
-            for layer in range(12):
+            # for layer in range(12):
+            layer = 11
+            if True:
                 att_layer_mask = np.zeros(shape=sample_image.size, dtype=np.uint8)
                 att_layer_mask = Image.fromarray(np.moveaxis(att_layer_mask, 0, -1))
                 img_draw = ImageDraw.Draw(att_layer_mask) 
@@ -176,13 +178,16 @@ def find_tokens_in_region(attention_map:np.array,
         
         # RANDOM token within object
         tokens_layer_i['random_obj'] = random.choice(mask_tokens)
+        if len(mask_tokens)>=3:
+            while tokens_layer_i['random_obj'] in [tokens_layer_i['max_obj'], tokens_layer_i['min_obj']]:
+                tokens_layer_i['random_obj'] = random.choice(mask_tokens)
         
         # Get top N activations of the layer
         # based on https://stackoverflow.com/questions/6910641/how-do-i-get-indices-of-n-maximum-values-in-a-numpy-array
-        top_n = np.argpartition(img_att_map_mask, -1 * max_n)[-1 * max_n:]
-        top_n = top_n[np.argsort(img_att_map_mask[top_n])]
-        top_n = top_n[::-1]
-        all_top_n.append(top_n)  
+        # top_n = np.argpartition(img_att_map_mask, -1 * max_n)[-1 * max_n:]
+        # top_n = top_n[np.argsort(img_att_map_mask[top_n])]
+        # top_n = top_n[::-1]
+        # all_top_n.append(top_n)  
         
         tokens[layer_no] = tokens_layer_i
 
@@ -277,9 +282,9 @@ def load_dataset(filename):
 
     return annotations, category_id_map
 
-def run_extraction(annotation_groups, object_mask_strategy, main_obj_mask_thr, second_obj_mask_thr):
-    labels_map = {27: 'backpack', 28: 'umbrella', 31: 'handbag', 32: 'tie', 33: 'suitcase'}
-    labels_map = {44: 'bottle', 47: 'cup', 48: 'fork', 49: 'knife', 51: 'bowl', 62: 'chair'}
+def run_extraction(annotation_groups, object_mask_strategy, main_obj_mask_thr, second_obj_mask_thr, category_id_map):
+    # labels_map = {27: 'backpack', 28: 'umbrella', 31: 'handbag', 32: 'tie',  33: 'suitcase'}
+    # labels_map = {44: 'bottle',   47: 'cup',      48: 'fork',    49: 'knife', 51: 'bowl', 62: 'chair'}
     feat_folder = f"features-mask-{str(object_mask_strategy)}-main_thr-{str(main_obj_mask_thr)}-sec_thr-{str(second_obj_mask_thr)}"
 
     for main_class, annotations_file in annotation_groups.items():
@@ -306,25 +311,42 @@ def run_extraction(annotation_groups, object_mask_strategy, main_obj_mask_thr, s
             batch_input = []
             batch_ann = []
             for idx, ann in enumerate(tqdm(task_annotations)):
-                # if ann['annotations']['second_object_in_caption']:
-                if False:
-                    count_img_with_caption += 1
-                else:
-                    count_img_no_caption += 1
-                
-                if count_img_no_caption >= 1000 and count_img_with_caption >= 1000:
+
+                ann_with_attn = [instance for instance in ann["annotations"]["annotations"] if instance["category_id"]==int(second_class)]
+                # print([(instance["id"], instance["attentions"]["max_attention"])  for instance in ann_with_attn ])
+                try:
+                    ann_with_attn = [(instance["id"], instance["attentions"]["max_attention"])  for instance in ann_with_attn if instance["attentions"]["max_attention"] > 0.10]
+                except:
+                    print(f"{ann['image']['file_name']} without attentions!")
+                    continue
+
+                if not ann_with_attn:
+                    # print("objects don't have attention, skipping")
+                    continue
+
+                count_img_no_caption += 1
+                if count_img_no_caption >= 1001:
                     print("Enough images (1000 with and without caption), stopping")
                     break
+                # if ann['annotations']['second_object_in_caption']:
+                # # if False:
+                #     count_img_with_caption += 1
+                # else:
+                #     count_img_no_caption += 1
+                
+                # if count_img_no_caption >= 1000 and count_img_with_caption >= 1000:
+                #     print("Enough images (1000 with and without caption), stopping")
+                #     break
                 
                 # if count_img_no_caption >= 1000 and not ann['annotations']['second_object_in_caption']:
-                if count_img_no_caption >= 1000 and not False:
-                    if warning_msg:
-                        print("Reached 1000 images without caption, collecting only images WITH caption now.")
-                        warning_msg = False
-                    continue
+                # # if count_img_no_caption >= 1000 and not False:
+                #     if warning_msg:
+                #         print("Reached 1000 images without caption, collecting only images WITH caption now.")
+                #         warning_msg = False
+                #     continue
                 # elif count_img_with_caption >= 1000 and ann['annotations']['second_object_in_caption']:
-                elif count_img_with_caption >= 1000 and False:
-                    continue                
+                # # elif count_img_with_caption >= 1000 and False:
+                #     continue                
                 
                 img = Image.open(os.path.join(COCO_PATH, 'train2017', ann['image']['file_name'])).convert('RGB')             
                 batch_input.append(img)
@@ -344,8 +366,9 @@ def run_extraction(annotation_groups, object_mask_strategy, main_obj_mask_thr, s
                         if masks is not None:
                             # attn based
                             if object_mask_strategy==4:
-                                fg_mask_main = np.array(masks[0][11].resize((224,224)))
-                                fg_mask_second = np.array(masks[1][11].resize((224,224)))
+                                #layer 0 because I'm extracting only 1 layer (11)
+                                fg_mask_main = np.array(masks[0][0].resize((224,224)))
+                                fg_mask_second = np.array(masks[1][0].resize((224,224)))
                             else:
                                 fg_mask_main = np.array(masks[0].resize((224,224)))
                                 fg_mask_second = np.array(masks[1].resize((224,224)))            
@@ -387,9 +410,10 @@ def run_extraction(annotation_groups, object_mask_strategy, main_obj_mask_thr, s
                                 features["second_fg_tokens_act"].append(token_act_per_layer)                    
                                 # features["caption_filter"].append(batch_ann[input_i]['annotations']['second_object_in_caption'])
                                 features["caption_filter"].append(False)
-                                features["class"].append(labels_map[int(second_class)])                    
+                                features["class"].append(category_id_map[int(second_class)])                    
                         else:
-                            print(f"mask is None: {batch_ann[input_i]['image']['file_name']}")
+                            # print(f"mask is None: {batch_ann[input_i]['image']['file_name']}")
+                            pass
                     batch_input = []
                     batch_ann = []
             feat_pd = pd.DataFrame(features)
@@ -399,20 +423,29 @@ def run_extraction(annotation_groups, object_mask_strategy, main_obj_mask_thr, s
 
 if __name__ == "__main__":
     model = VITCaptioningModel(output_encoder_attentions=True, output_encoder_hidden_states=True)
-    # person_annotations, category_id_map = load_dataset("../task2_person_accessory_data_w_caption.json")
-    diningtable_annotations, category_id_map = load_dataset("../task2_dining_objects_data.json")
+    # person_annotations, category_id_map = load_dataset("../task1_person_accessory_data_w_caption.json")
+    # person_annotations, category_id_map = load_dataset("../task1_person_accessory_data_capton_attention.json")    
+    # diningtable_annotations, category_id_map = load_dataset("../task2_dining_objects_data.json")
+
+    person_annotations, category_id_map = load_dataset("../task3_person_data_attention.json")    
+    car_annotations, category_id_map = load_dataset("../task3_car_data_attention.json")    
     
     for mask_strategy in [3,4]:
-        for obj_threshold in [0,5,20,40]:
+        for obj_threshold in [0]:
             print(f"Generating features: mask:{str(mask_strategy)} main_thr: {str(obj_threshold)} sec_thr: {str(obj_threshold)}")
             # run_extraction(annotation_groups={1: person_annotations}, 
             #                object_mask_strategy=mask_strategy, 
             #                main_obj_mask_thr=obj_threshold, 
             #                second_obj_mask_thr=obj_threshold)
-            run_extraction(annotation_groups={67: diningtable_annotations}, 
+            # run_extraction(annotation_groups={67: diningtable_annotations}, 
+            #                object_mask_strategy=mask_strategy, 
+            #                main_obj_mask_thr=obj_threshold, 
+            #                second_obj_mask_thr=obj_threshold)
+            run_extraction(annotation_groups={1: person_annotations, 3: car_annotations}, 
                            object_mask_strategy=mask_strategy, 
                            main_obj_mask_thr=obj_threshold, 
-                           second_obj_mask_thr=obj_threshold)
+                           second_obj_mask_thr=obj_threshold,
+                           category_id_map=category_id_map)
      
 
     
