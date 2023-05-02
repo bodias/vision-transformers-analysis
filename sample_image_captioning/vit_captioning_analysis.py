@@ -185,13 +185,13 @@ def order_obj_instances(img: Image, category_id:int, image_annotations, layer_at
     for idx, ann in enumerate(object_annotations):
         mask = create_fg_mask(img.size, ann)
         mask = pre_process_mask(mask)
-        mask_patches = find_mask_tokens(np.array(img.resize((224,224))), mask, .05)[1]
+        mask_patches = find_mask_tokens(np.array(img.resize((224,224))), mask, .0)[1]
         
         obj_att_map = copy.deepcopy(layer_attention_map)
         # put into [0, 1] scale
         obj_att_map = obj_att_map / obj_att_map.max()
         # mask background
-        obj_att_map[~mask_patches] = 0.0        
+        obj_att_map[~mask_patches] = 0.0
         max_attention = np.max(obj_att_map)        
         obj_instance_attention[idx] = max_attention
     

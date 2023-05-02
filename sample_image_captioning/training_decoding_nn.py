@@ -1,4 +1,5 @@
 import os
+import sys
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2' 
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
@@ -37,7 +38,7 @@ def base_model(model="NN", n_classes = 5):
         clf_model = svm.SVC(kernel='linear') # Linear Kernel
     return clf_model
 
-def prepare_dataset(dataset_folder, filter_caption=None):
+def prepare_dataset(dataset_folder, filter_caption=None, limit_size=1000):
     # files with features and labels are split due to ram limitations
     # on generation it has to fit ram, and also on reading
     files = os.listdir(dataset_folder)
@@ -48,8 +49,8 @@ def prepare_dataset(dataset_folder, filter_caption=None):
             print(f"person dataset {file[16]}")
             first_label = "person"
         else:
-            print(f"car dataset {file[16]}")
-            first_label = "car"
+            print(f"dining_table dataset {file[16]}")
+            first_label = "dining_table"
 
         print(f"Processing file '{file}'")    
         obj_features = pd.read_pickle(os.path.join(dataset_folder, file))
@@ -61,7 +62,7 @@ def prepare_dataset(dataset_folder, filter_caption=None):
             # order by caption filter to make sure there's caption_filter since only a few have
             obj_features = obj_features.sort_values(by=['caption_filter'], ascending=False)
             obj_features = obj_features.reset_index(drop=True)
-        obj_features = obj_features[:1000]
+        obj_features = obj_features[:limit_size]
         features = pd.concat([features, obj_features])
 
     features = features.reset_index(drop=True)
@@ -104,6 +105,17 @@ def dataset_split(features, testset_file=""):
                                                                     stratify=features.filter(items=train_idx, axis=0)["labels_caption"].tolist(),
                                                                     random_state=42, 
                                                                     shuffle=True)   
+
+    return train_idx, val_idx, test_idx, train_labels, val_labels, test_labels
+
+def coco_dataset_split(train_features, test_features):
+    train_idx, val_idx, train_labels, val_labels = train_test_split(train_features.index.tolist(), 
+                                                                    train_features["labels"].tolist(), 
+                                                                    test_size=0.10, 
+                                                                    stratify=train_features["labels_caption"].tolist(),
+                                                                    random_state=42, 
+                                                                    shuffle=True)
+    test_idx, test_labels = test_features.index.tolist(), test_features["labels"].tolist()
 
     return train_idx, val_idx, test_idx, train_labels, val_labels, test_labels
 
@@ -157,9 +169,9 @@ def save_test_scores(scores, exp_name, filename, class_labels = None):
     scores_pd.to_csv(filename, index=False)
     return scores_pd    
 
-def run_experiments(features,
-                    labels,
+def run_experiments(train_features,                    
                     exp_name,
+                    test_features=None,
                     unique_label_names = None,
                     token_strategies = ['max_image', 'max_obj', 'min_obj', 'random_obj'],
                     layers = [3, 4, 9, 10, 11],
@@ -167,8 +179,17 @@ def run_experiments(features,
                     models = ['NN'],
                     epochs = 60):
     
-    print(f"dataset size: {len(features)}")
-    train_idx, val_idx, test_idx, train_labels, val_labels, test_labels = dataset_split(features)
+    print(f"\nTraining dataset size: {len(train_features)}")
+    for label in unique_label_names:
+        print(f"\t{label}: {len(train_features[train_features['class']==label])}")   
+
+    if test_features is not None:
+        print(f"Test dataset size: {len(test_features)}")
+        for label in unique_label_names:
+            print(f"\t{label}: {len(test_features[test_features['class']==label])}")
+        train_idx, val_idx, test_idx, train_labels, val_labels, test_labels = coco_dataset_split(train_features, test_features)
+    else:
+        train_idx, val_idx, test_idx, train_labels, val_labels, test_labels = dataset_split(train_features)
     
     # create a cartesian product with all parameters
     params = list(product(token_strategies, layers, objects, models))
@@ -192,12 +213,16 @@ def run_experiments(features,
             val_y = val_labels
             test_y = test_labels
 
-        train_x = features.filter(items=train_idx, axis=0)[f"{obj}_fg_tokens_act"].apply(lambda x: x[layer][strategy]).to_numpy()
-        val_x = features.filter(items=val_idx, axis=0)[f"{obj}_fg_tokens_act"].apply(lambda x: x[layer][strategy]).to_numpy()
-        test_x = features.filter(items=test_idx, axis=0)[f"{obj}_fg_tokens_act"].apply(lambda x: x[layer][strategy]).to_numpy()
+        train_x = train_features.filter(items=train_idx, axis=0)[f"{obj}_fg_tokens_act"].apply(lambda x: x[layer][strategy]).to_numpy()
+        val_x = train_features.filter(items=val_idx, axis=0)[f"{obj}_fg_tokens_act"].apply(lambda x: x[layer][strategy]).to_numpy()
+        if test_features is not None:
+            test_x = test_features[f"{obj}_fg_tokens_act"].apply(lambda x: x[layer][strategy]).to_numpy()
+        else:
+            test_x = train_features.filter(items=test_idx, axis=0)[f"{obj}_fg_tokens_act"].apply(lambda x: x[layer][strategy]).to_numpy()
         
-        clf_model = base_model(model, n_classes=len(set(labels)))
-        print(f"Experiment {exp_n}/{len(params)} {exp_name} - training model l:{layer} o:{obj} s:{strategy}")
+        
+        clf_model = base_model(model, n_classes=len(unique_label_names))
+        print(f"\nExperiment {exp_n}/{len(params)} {exp_name} - training model l:{layer} o:{obj} s:{strategy}")
         if model == "NN":
             es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience=20, restore_best_weights=True)
             hist = clf_model.fit(tf.stack(train_x), 
@@ -249,16 +274,26 @@ if __name__ == "__main__":
     #                         exp_name=exp_name,
     #                         models=["NN","SVM"])
 
-    dataset_folder = "feat_two_objects/features-mask-4-main_thr-0-sec_thr-0/"
+    # dataset_folder = "connected_feat_caption_2/features-mask-4-main_thr-0-sec_thr-0/"    
     # dataset_folder = "features_dining-table/features-mask-4-main_thr-0-sec_thr-0/"
-    exp_name = f"exp_full_{dataset_folder[26:-1]}_attn_filter"
-    # exp_name = f"exp_dining_{dataset_folder[31:-1]}_sgd2"
+    if len(sys.argv)>=3:
+        exp_name = sys.argv[1]
+        train_dataset = sys.argv[2]
+        print(f"Experiment name: {exp_name}")
+        print(f"Train dataset: {train_dataset}")
+        if len(sys.argv)>=4:
+            test_dataset = sys.argv[3]
+            print(f"Test dataset: {test_dataset}\n")
+
+    # exp_name = f"exp_30-04_person_accessory"
+    # exp_name = f"exp_dining_{dataset_folder[31:-1]}_sgd2"    
     os.makedirs(os.path.join(EXP_FOLDER, exp_name), exist_ok=True)
-    features, labels = prepare_dataset(dataset_folder)
-    print(labels)
-    run_experiments(features=features, 
-                    labels=features["labels"], 
-                    unique_label_names = labels,     
+    train_features, train_labels = prepare_dataset(train_dataset, limit_size=1000)
+    test_features, test_labels = prepare_dataset(test_dataset, limit_size=100)
+    print(f"\nLabels: {train_labels}")
+    run_experiments(train_features=train_features, 
+                    test_features=test_features, 
+                    unique_label_names = train_labels,     
                     exp_name=exp_name,
                     epochs=200,
                     models=["NN"])
