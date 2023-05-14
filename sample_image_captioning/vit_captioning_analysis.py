@@ -6,6 +6,7 @@ import copy
 from PIL import Image, ImageDraw
 import cv2
 import os
+import matplotlib.pyplot as plt
 
 os.environ["WANDB_DISABLED"] = "true"
 
@@ -178,10 +179,13 @@ def pre_process_mask(mask: Image, new_size=(224,224))-> np.ndarray:
 
 # orders object instances by attention.
 # TODO: improve function name, not very descriptive 
-def order_obj_instances(img: Image, category_id:int, image_annotations, layer_attention_map):
+def order_obj_instances(img: Image, image_annotations, layer_attention_map, category_id:int=-1):
     obj_instance_attention = {}
-    
-    object_annotations = [ann for ann in image_annotations['annotations']['annotations'] if ann['iscrowd']==0 and ann['category_id']==category_id]
+    if category_id>0:
+        object_annotations = [ann for ann in image_annotations['annotations']['annotations'] if ann['iscrowd']==0 and ann['category_id']==category_id]
+    else:
+        object_annotations = [ann for ann in image_annotations['annotations']['annotations'] if ann['iscrowd']==0]
+
     for idx, ann in enumerate(object_annotations):
         mask = create_fg_mask(img.size, ann)
         mask = pre_process_mask(mask)
@@ -198,3 +202,41 @@ def order_obj_instances(img: Image, category_id:int, image_annotations, layer_at
     obj_instance_sorted = sorted(obj_instance_attention.items(), key=lambda x:x[1], reverse=True)
     obj_instance_sorted = [(object_annotations[instance[0]],instance[1]) for instance in obj_instance_sorted]
     return obj_instance_sorted       
+
+def generate_token_grid(img_patches, mask_patches=[]):
+    #if no mask patches plot the original image without masking anything    
+    if not mask_patches:
+        mask_patches = [True] * 196
+        img_patch_color = "black"
+        img_patch_border = 0
+    else:
+        img_patch_color = "red"
+        img_patch_border = 1.5
+    black_patch = np.zeros_like(img_patches[0])
+    fig, axs = plt.subplots(nrows=14, ncols=14, figsize=(4, 4))
+    for patch_i, img_patch in enumerate(img_patches):
+        row_p, col_p = xy_coord_token(patch_i)
+        if mask_patches[patch_i]:
+            axs[col_p, row_p].imshow(img_patch)    
+            axs[col_p, row_p].spines['top'].set_linewidth(img_patch_border)
+            axs[col_p, row_p].spines['top'].set_color(img_patch_color)
+            axs[col_p, row_p].spines['right'].set_linewidth(img_patch_border)
+            axs[col_p, row_p].spines['right'].set_color(img_patch_color)
+            axs[col_p, row_p].spines['bottom'].set_linewidth(img_patch_border)
+            axs[col_p, row_p].spines['bottom'].set_color(img_patch_color)
+            axs[col_p, row_p].spines['left'].set_linewidth(img_patch_border)
+            axs[col_p, row_p].spines['left'].set_color(img_patch_color)                    
+        else:
+            axs[col_p, row_p].imshow(black_patch)
+#             axs[col_p, row_p].axis('off')
+        # Hide X and Y axes label marks
+        axs[col_p, row_p].xaxis.set_tick_params(labelbottom=False)
+        axs[col_p, row_p].yaxis.set_tick_params(labelleft=False)
+        # Hide X and Y axes tick marks
+        axs[col_p, row_p].set_xticks([])
+        axs[col_p, row_p].set_yticks([])
+    img_buf = io.BytesIO()
+    plt.savefig(img_buf, bbox_inches='tight', format='png')
+    plt.close(fig)
+    
+    return Image.open(img_buf)

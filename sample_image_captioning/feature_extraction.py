@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import pandas as pd
 from tqdm import tqdm
+from ast import literal_eval
 
 import matplotlib.pyplot as plt
 
@@ -19,7 +20,7 @@ os.environ["WANDB_DISABLED"] = "true"
 from vit_captioning_analysis import VITCaptioningModel
 from vit_captioning_analysis import order_obj_instances
 from vit_captioning_analysis import is_patch_within_mask, find_original_img_patch
-from vit_captioning_analysis import xy_coord_token, find_mask_tokens
+from vit_captioning_analysis import xy_coord_token, find_mask_tokens, generate_token_grid
 
 COCO_PATH = "../../../datasets/coco"
 BATCH_SIZE = 6
@@ -48,37 +49,46 @@ def get_largest_mask(annotation, obj, img_draw):
     return [largest_obj_ann]
     
 def get_all_masks(annotation, obj, img_draw):
-    segmentation = [ann['segmentation'] for ann in annotation['annotations']['annotations'] if ann['category_id']==obj]
-    for segment in segmentation:
+    obj_annotation = [ann for ann in annotation['annotations']['annotations'] if ann['category_id']==obj]
+    for ann in obj_annotation:
+        segment = ann["segmentation"]
         if isinstance(segment, list):
             try:
                 img_draw.polygon(segment[0], fill ="#ffffff")
             except ValueError:
                 return None
-    return None
+    return obj_annotation
 
 def get_mask_with_attention(img, annotation, category_id, img_draw, layer_attention_maps):
-    segm_with_att = order_obj_instances(img, category_id, annotation, layer_attention_maps)
-    for segment in segm_with_att[0][0]['segmentation']:
+    objects_with_attention = order_obj_instances(img, image_annotations=annotation, category_id=category_id, layer_attention_map=layer_attention_maps)
+    # list is ordered by max_attention, get the first element (object with max_attention)
+    for segment in objects_with_attention[0][0]['segmentation']:
         img_draw.polygon(segment, fill ="#ffffff")
-    return segm_with_att[0]
+    #objects_with_attention[0=top attention](ann, att_score)
+    return [objects_with_attention[0][0]]
 
-def get_objects_mask(annotation, objects=[], option=1, attention_maps=None, layer=11, split='train2017'):
+def get_objects_mask(annotation, objects=[], option=1, attention_maps=None, layers=[11], split='train2017'):
     sample_image = Image.open(os.path.join(COCO_PATH, split, annotation['image']['file_name'])).convert('RGB')    
     masks = []
+    obj_annotations = []
 
     try:
         for idx, obj in enumerate(objects):
+            obj_annotation = []
+            
             pil_mask = np.zeros(shape=sample_image.size, dtype=np.uint8)
             pil_mask = Image.fromarray(np.moveaxis(pil_mask, 0, -1))
             img_draw = ImageDraw.Draw(pil_mask) 
             
             if option == 1:
-                get_largest_mask(annotation, obj, img_draw)
+                obj_annotation = get_largest_mask(annotation, obj, img_draw)
+                pil_mask = [pil_mask] #for compatibility
+                
 
             # merge all masks of the object class into one
             elif option == 2:
-                get_all_masks(annotation, obj, img_draw)    
+                obj_annotation = get_all_masks(annotation, obj, img_draw)    
+                pil_mask = [pil_mask] #for compatibility
                         
             # get closest mask based on a reference mask (first object)
             # calculate the centroid and then find the other mask closest to this centroid
@@ -86,81 +96,96 @@ def get_objects_mask(annotation, objects=[], option=1, attention_maps=None, laye
             elif option == 3:
                 ## assume first object is the reference. Get the first object based on biggest mask
                 if idx==0:
-                    ref_annotation = get_largest_mask(annotation, obj, img_draw)[0]
+                    obj_annotation = get_largest_mask(annotation, obj, img_draw)
+                    pil_mask = [pil_mask] #for compatibility
                 else:
-                    ref_center = get_bbox_center(ref_annotation)
-                    distances = [(np.linalg.norm(ref_center - get_bbox_center(ann)), ann["id"]) for ann in annotation['annotations']['annotations'] if ann['category_id']==obj]
-                    closest_obj = distances[0]
-                    segmentation = [ann['segmentation'] for ann in annotation['annotations']['annotations'] if ann['id']==closest_obj[1]]
-                    for segment in segmentation[0]:
+                    # obj_annotation will be the idx 0 aka the main object
+                    ref_center = get_bbox_center(obj_annotations[0][0])
+                    distances = [(np.linalg.norm(ref_center - get_bbox_center(ann)), ann["id"]) for ann in annotation['annotations']['annotations'] if ann['category_id']==obj and ann['iscrowd']==0]
+                    closest_obj = sorted(distances, key=lambda x: x[0], reverse=False)[0]
+                    obj_annotation = [[ann for ann in annotation['annotations']['annotations'] if ann['id']==closest_obj[1] and ann['iscrowd']==0][0]]
+                    for segment in obj_annotation[0]["segmentation"]:
                         try:
                             img_draw.polygon(segment, fill ="#ffffff")
                         except ValueError:
-                            return None
+                            print(f"ValueError: {obj_annotation}")
+                            return None, None
+                    pil_mask = [pil_mask] #for compatibility
             
             elif option == 4:
                 # this option produces 12 masks, one for each layer of the transformers encoder
                 pil_mask = []
-                # get mask with attention based on layer input
-                att_layer_mask = np.zeros(shape=sample_image.size, dtype=np.uint8)
-                att_layer_mask = Image.fromarray(np.moveaxis(att_layer_mask, 0, -1))
-                img_draw = ImageDraw.Draw(att_layer_mask) 
-                get_mask_with_attention(sample_image, 
-                                        annotation, 
-                                        obj, 
-                                        img_draw, 
-                                        attention_maps[layer][0, 1:])
-                pil_mask.append(att_layer_mask)
+                for layer in layers:
+                    att_layer_mask = np.zeros(shape=sample_image.size, dtype=np.uint8)
+                    att_layer_mask = Image.fromarray(np.moveaxis(att_layer_mask, 0, -1))
+                    img_draw = ImageDraw.Draw(att_layer_mask) 
+                    obj_ann = get_mask_with_attention(sample_image, 
+                                                      annotation, 
+                                                      obj, 
+                                                      img_draw, 
+                                                      attention_maps[layer][0, 1:])
+                    obj_annotation.append(obj_ann)
+                    pil_mask.append(att_layer_mask)
             
             masks.append(pil_mask)
+            obj_annotations.append(obj_annotation)
     except IndexError:
         print(f"Annotation : {annotation}")
         print(f"Object : {obj}")
         raise
         
-    return masks
+    return masks, obj_annotations
+
+
 
 # TODO: Improve logic of consistent tokens to account for different variations of layers and not only the last N
 def find_tokens_in_region(attention_map:np.array, 
                           img: np.array, 
-                          mask: np.array, 
+                          masks: list, #one mask per layer
                           layers=[9,10,11], 
                           min_n=3, 
                           max_n=20,
                           mask_threshold=.75,
                           grid_size=14,
                           display_token_grid=False,
-                          display_att_layers=False):
+                          display_att_layers=False,
+                          plot_axs=None,
+                          plot_starting_row=0):
+    if len(masks)!=len(layers):
+        print("'mask' needs one mask per layer in 'layers'")
+        return None, None, None
+    
     tokens = {}
     all_top_n = []
     
-    if display_token_grid:
-        # show original mask
-        plt.figure(figsize=(6, 6))
-        plt.imshow(mask)
-        plt.show()
-        # set up the plot with 14x14 image patches
-        fig, axs = plt.subplots(nrows=14, ncols=14, figsize=(6, 6))
-    
-    # find which tokens belong to the mask
-    mask_tokens, mask_patches, img_patches = find_mask_tokens(img, mask, mask_threshold)
-    # If there are not tokens related to the mask, it is probably
-    # because the mask region inside the patch is too small
-    # try to find mask tokens again with threshold=0.
-    #    e.g.: if one pixel falls into the mask patch it means it is a mask token/patch
-    if not mask_tokens:
-        mask_tokens, mask_patches, img_patches = find_mask_tokens(img, mask, mask_threshold=0)
-        if not mask_tokens:
-            return None, None, None
+    masks_tokens, masks_patches, imgs_patches = [], [], []
+    for obj_mask in masks:
+        # find which tokens belong to the mask
+        mask_tokens_, mask_patches_, img_patches_ = find_mask_tokens(img, obj_mask, mask_threshold)        
+        # If there are not tokens related to the mask, it is probably
+        # because the mask region inside the patch is too small
+        # try to find mask tokens again with threshold=0.
+        #    e.g.: if one pixel falls into the mask patch it means it is a mask token/patch
+        if not mask_tokens_:
+            mask_tokens_, mask_patches_, img_patches_ = find_mask_tokens(img, obj_mask, mask_threshold=0)
+            if not mask_tokens_:
+                return None, None, None
+        masks_tokens.append(mask_tokens_)
+        masks_patches.append(mask_patches_)
+        imgs_patches.append(img_patches_)
         
     # for each n_layers in the attention_map
     # find all tokens
-    for layer_no in layers: #enumerate(attention_map[n_layers:, :, :]):
+    disp_idx = plot_starting_row
+    mask_idx = 0
+    for layer_no, mask_tokens, mask_patches, img_patches in zip(layers, masks_tokens, masks_patches, imgs_patches): 
         layer = attention_map[layer_no, :, :]
         tokens_layer_i = {}
         
-        # MAX token whole image
-        tokens_layer_i['max_image'] = np.argmax(layer[0, 1:])
+        # MAX token whole image, excluding object area
+        bg_att_map_mask = copy.deepcopy(layer[0, 1:])
+        bg_att_map_mask[mask_patches] = 0
+        tokens_layer_i['max_image'] = np.argmax(bg_att_map_mask)
         
         # set all background activation WITHIN background mask to -1
         img_att_map_mask = copy.deepcopy(layer[0, 1:])
@@ -196,31 +221,30 @@ def find_tokens_in_region(attention_map:np.array,
         
         tokens[layer_no] = tokens_layer_i
 
-        # show grid with all tokens found
+        # show grid with all tokens found given the input mask
         if display_token_grid:
-            for patch_i, img_patch in enumerate(img_patches):
-                row_p, col_p = xy_coord_token(patch_i)
-                if mask_patches[patch_i]:
-                    axs[col_p, row_p].imshow(img_patch)                       
-                else:
-                    axs[col_p, row_p].imshow(np.zeros_like(img_patch))
-    #                 axs[col_p, row_p].set_title(mask_patches[patch_i])
-                axs[col_p, row_p].axis('off')
-            plt.show()
+            token_grid = generate_token_grid(img_patches, list(mask_patches))
             
         if display_att_layers:
-            plt.figure(figsize=(3, 3))
-            plt.imshow(img_att_map_mask.reshape(grid_size, grid_size))
-            plt.title(f"layer {layer_no}, shape {img_att_map_mask.shape} ")
+#             plot_axs[disp_idx, 0].imshow(masks[mask_idx])
+            plot_axs[disp_idx, 1].imshow(masks[mask_idx])
+            plot_axs[disp_idx, 1].axis('off')
+            plot_axs[disp_idx, 2].imshow(token_grid)            
+            plot_axs[disp_idx, 3].imshow(layer[0, 1:].reshape(grid_size, grid_size))
+            plot_axs[disp_idx, 3].grid(visible=True)
+            plot_axs[disp_idx, 4].imshow(img_att_map_mask.reshape(grid_size, grid_size))
+            plot_axs[disp_idx, 4].set_title(f"layer {layer_no}, shape {img_att_map_mask.shape} ")
+            plot_axs[disp_idx, 4].grid(visible=True)
             row_p, col_p = xy_coord_token(tokens_layer_i['min_obj'])
-            plt.scatter(row_p, col_p, marker='_', c='blue')
+            plot_axs[disp_idx, 4].scatter(row_p, col_p, marker='_', s=400, c='white')
             row_p, col_p = xy_coord_token(tokens_layer_i['max_obj'])
-            plt.scatter(row_p, col_p, marker='+', c='red')
+            plot_axs[disp_idx, 4].scatter(row_p, col_p, marker='+', s=400, c='red')
             row_p, col_p = xy_coord_token(tokens_layer_i['random_obj'])
-            plt.scatter(row_p, col_p, marker='*', c='green')
+            plot_axs[disp_idx, 4].scatter(row_p, col_p, marker='*', s=400, c='green')
             row_p, col_p = xy_coord_token(tokens_layer_i['max_image'])
-            plt.scatter(row_p, col_p, marker='P', c='orange')
-            plt.show()
+            plot_axs[disp_idx, 4].scatter(row_p, col_p, marker='P', s=400, c='orange')            
+            disp_idx += 1
+            mask_idx += 1            
     
     consistent_token = None
 #     # FOR CONSISTENT TOKEN ACROSS SEVERAL LAYERS
@@ -253,29 +277,32 @@ def find_tokens_in_region(attention_map:np.array,
 
     return tokens, consistent_token, all_top_n
 
-def extract_tokens(img: Image.Image, mask:np.array, mean_att_map, layers:list, mask_threshold=.75, debug=False):
-        
+def extract_tokens(img: Image.Image, object_mask:list, mean_att_map, layers:list, mask_threshold=.75, debug=False, plot_axs=None,plot_starting_row=0):
     # some regions of the image have intermediate values between 0 and 255
     # maybe resizing the image create these "intermediate" pixels.
-    fg_mask_img = copy.deepcopy(mask)
-    fg_mask_img[fg_mask_img==255] = 255
-    fg_mask_img[fg_mask_img!=255] = 0
-    fg_mask_img = fg_mask_img[:,:,np.newaxis]
-    # get background mask by reversing the image mask
-    bg_mask_img = copy.deepcopy(fg_mask_img)
-    bg_mask_img[fg_mask_img==255] = 0
-    bg_mask_img[fg_mask_img!=255] = 255
+    def separate_masks(mask):
+        fg_mask_img = copy.deepcopy(mask)
+        fg_mask_img[fg_mask_img==255] = 255
+        fg_mask_img[fg_mask_img!=255] = 0
+        fg_mask_img = fg_mask_img[:,:,np.newaxis]
+        # get background mask by reversing the image mask
+        bg_mask_img = copy.deepcopy(fg_mask_img)
+        bg_mask_img[fg_mask_img==255] = 0
+        bg_mask_img[fg_mask_img!=255] = 255
+        return fg_mask_img, bg_mask_img
     
 ## Not using background tokens at the moment
 #     bg_tokens, consistent_bg_token, _ = find_tokens_in_region(mean_att_map, np.array(img), bg_mask_img, mask_threshold=mask_threshold,
 #                                                               display_token_grid=debug, display_att_layers=debug)
     fg_tokens, consistent_fg_token, _ = find_tokens_in_region(attention_map=mean_att_map, 
                                                               img=np.array(img), 
-                                                              mask=fg_mask_img, 
+                                                              masks=[separate_masks(mask)[0] for mask in object_mask], 
                                                               layers=layers,
                                                               mask_threshold=mask_threshold,
                                                               display_token_grid=debug, 
-                                                              display_att_layers=debug)
+                                                              display_att_layers=debug,
+                                                              plot_axs=plot_axs,
+                                                              plot_starting_row=plot_starting_row)
     
     return fg_tokens, consistent_fg_token
 
@@ -287,7 +314,17 @@ def load_dataset(filename):
 
     return annotations, category_id_map
 
-def run_extraction(annotation_groups, object_mask_strategy, main_obj_mask_thr, second_obj_mask_thr, category_id_map, split, feature_name, use_attention=False, use_caption=False, max_images=1000):
+def run_extraction(annotation_groups, 
+                   object_mask_strategy, 
+                   layers,
+                   main_obj_mask_thr, 
+                   second_obj_mask_thr, 
+                   category_id_map, 
+                   split, 
+                   feature_name, 
+                   use_attention=False, 
+                   use_caption=False, 
+                   max_images=1000):
     feat_folder = f"{split}/{feature_name}/features-mask-{str(object_mask_strategy)}-main_thr-{str(main_obj_mask_thr)}-sec_thr-{str(second_obj_mask_thr)}"
 
     for main_class, annotations_file in annotation_groups.items():
@@ -364,34 +401,37 @@ def run_extraction(annotation_groups, object_mask_strategy, main_obj_mask_thr, s
                     mean_att_map = model.get_all_attention_maps(torch.stack(outputs.encoder_attentions), renorm_weights=True)            
                     mean_att_map = mean_att_map.cpu().detach().numpy()
                     
-                    for input_i in range(len(batch_input)):                    
-                        masks = get_objects_mask(batch_ann[input_i], 
-                                                 objects=[int(main_class), int(second_class)], 
-                                                 option=object_mask_strategy, 
-                                                 attention_maps=mean_att_map[:,input_i,:,:],
-                                                 split=split)
+                    for input_i in range(len(batch_input)):     
+                        if batch_ann[input_i]['image']['id'] == 424162:
+                            print("##########################################################################")
+                            print(batch_ann[input_i])
+
+                        masks, obj_ann = get_objects_mask(annotation=batch_ann[input_i], 
+                                                          objects=[int(main_class), int(second_class)], 
+                                                          option=object_mask_strategy, 
+                                                          attention_maps=mean_att_map[:,input_i,:,:],
+                                                          layers=layers,
+                                                          split=data_split)
                         if masks is not None:
                             # attn based
-                            if object_mask_strategy==4:
-                                #layer 0 because I'm extracting only 1 layer (11)
-                                fg_mask_main = np.array(masks[0][0].resize((224,224)))
-                                fg_mask_second = np.array(masks[1][0].resize((224,224)))
-                            else:
-                                fg_mask_main = np.array(masks[0].resize((224,224)))
-                                fg_mask_second = np.array(masks[1].resize((224,224)))            
+                            if object_mask_strategy!=4:
+                                # repeat the same object mask per layer if attention based is not used
+                                masks = [len(layers)*[mask for mask in obj] for obj in masks]
                             # MAIN OBJECT
                             main_fg_tokens, main_cons_fg_token = extract_tokens(img=img.resize((224,224)), 
-                                                                                mask=fg_mask_main,
+                                                                                object_mask=[np.array(mask.resize((224,224))) for mask in masks[0]],
                                                                                 mean_att_map=mean_att_map[:,input_i,:,:],
-                                                                                layers=[3,4,9,10,11],
+                                                                                layers=layers,
                                                                                 mask_threshold=main_obj_mask_thr)
                             # SECOND OBJECT
                             sec_fg_tokens, sec_cons_fg_token = extract_tokens(img=img.resize((224,224)), 
-                                                                            mask=fg_mask_second,
-                                                                            mean_att_map=mean_att_map[:,input_i,:,:],
-                                                                            layers=[3,4,9,10,11],
-                                                                            mask_threshold=second_obj_mask_thr)
-                            
+                                                                              object_mask=[np.array(mask.resize((224,224))) for mask in masks[1]],
+                                                                              mean_att_map=mean_att_map[:,input_i,:,:],
+                                                                              layers=layers,
+                                                                              mask_threshold=second_obj_mask_thr)
+                            if batch_ann[input_i]['image']['id'] == 424162:
+                                print(f"main_tokens :{main_fg_tokens}")
+                                print(f"main_tokens :{sec_fg_tokens}")
                             if main_fg_tokens is not None and sec_fg_tokens is not None:
                                 features["image_id"].append(batch_ann[input_i]['image']['id'])
                                 features["image_filename"].append(batch_ann[input_i]['image']['file_name'])
@@ -434,34 +474,31 @@ def run_extraction(annotation_groups, object_mask_strategy, main_obj_mask_thr, s
 if __name__ == "__main__":
     
     # data_split = "val2017"
+    layers = [3,4,9,10,11]
+    # layers= [2,5,6,7,8]
     main2_obj_id = None
     dataset_main2_obj = None
     if len(sys.argv)>=5:
         feature_set_name = sys.argv[1] 
         data_split = sys.argv[2]
-        main1_obj_id = int(sys.argv[3])
-        dataset_main1_obj = sys.argv[4]        
+        layers = sys.argv[3]
+        layers = f"[{layers}]"
+        layers = literal_eval(layers)
+        print(f"Layers used to extract tokens : {layers} ({type(layers)})\n")
+        main1_obj_id = int(sys.argv[4])
+        dataset_main1_obj = sys.argv[5]        
         print(f"Feature set name: {feature_set_name}")
         print(f"Data split name: {data_split}")
         print(f"Object id (1st Main object): {main1_obj_id}")
-        print(f"Dataset (1st Main object): {dataset_main1_obj}")
-        if len(sys.argv)>=7:
-            main2_obj_id = int(sys.argv[5])
-            dataset_main2_obj = sys.argv[6]
+        print(f"Dataset (1st Main object): {dataset_main1_obj}")        
+        if len(sys.argv)>=8:
+            main2_obj_id = int(sys.argv[6])
+            dataset_main2_obj = sys.argv[7]
             print(f"Object id (2nd Main object) : {main2_obj_id}")
-            print(f"Dataset (2nd Main object): {dataset_main2_obj}\n")
+            print(f"Dataset (2nd Main object): {dataset_main2_obj}\n")           
     
     model = VITCaptioningModel(output_encoder_attentions=True, output_encoder_hidden_states=True)
 
-    # TODO: change this loading process to be command line based
-    # person_annotations, category_id_map = load_dataset(f"../filtered_datasets/{data_split}/task1_person_accessory_data.json")
-    # person_annotations, category_id_map = load_dataset(f"../filtered_datasets/{data_split}/task1_person_accessory_data_w_caption.json")
-    # person_annotations, category_id_map = load_dataset(f"../filtered_datasets/{data_split}/task1_person_accessory_data_capton_attention.json")    
-    # diningtable_annotations, category_id_map = load_dataset(f"../filtered_datasets/{data_split}/task2_dining_objects_data.json")
-
-    # person_annotations, category_id_map = load_dataset(f"../filtered_datasets/{data_split}/task5_person_data_attention_caption.json")    
-    # dining_table_annotations, category_id_map = load_dataset(f"../filtered_datasets/{data_split}/task4_dining_table_data_attention_caption.json")  
-    # 
     main1_annotations, category_id_map = load_dataset(dataset_main1_obj)
     if main2_obj_id is not None:
         main2_annotations, category_id_map = load_dataset(dataset_main2_obj)
@@ -477,21 +514,13 @@ if __name__ == "__main__":
             print(f"Generating features: mask:{str(mask_strategy)} main_thr: {str(obj_threshold)} sec_thr: {str(obj_threshold)}")
             run_extraction(annotation_groups=object_pairs, 
                            object_mask_strategy=mask_strategy, 
+                           layers=layers,
                            main_obj_mask_thr=obj_threshold, 
                            second_obj_mask_thr=obj_threshold,
                            category_id_map=category_id_map,
                            split=data_split,
-                           feature_name = feature_set_name)
-            # run_extraction(annotation_groups={67: diningtable_annotations}, 
-            #                object_mask_strategy=mask_strategy, 
-            #                main_obj_mask_thr=obj_threshold, 
-            #                second_obj_mask_thr=obj_threshold,
-            #                category_id_map=category_id_map)
-            # run_extraction(annotation_groups={1: person_annotations, 67: dining_table_annotations}, 
-            #                object_mask_strategy=mask_strategy, 
-            #                main_obj_mask_thr=obj_threshold, 
-            #                second_obj_mask_thr=obj_threshold,
-            #                category_id_map=category_id_map)
+                           feature_name = feature_set_name,
+                           use_caption=dataset_main1_obj.find("caption")>=0)
      
 
     

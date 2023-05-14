@@ -10,6 +10,7 @@ from tensorflow.keras.optimizers import SGD, Adam
 from tensorflow.keras.layers import Dense, Dropout, Input
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from ast import literal_eval
 
 #Import svm model
 from sklearn import svm
@@ -21,7 +22,7 @@ from tqdm import tqdm
 import pickle
 from itertools import product
 
-EXP_FOLDER = "experiments"
+EXP_FOLDER = "experiments_rerun"
 
 def base_model(model="NN", n_classes = 5):
     if model == "NN":
@@ -40,7 +41,7 @@ def base_model(model="NN", n_classes = 5):
 
 def prepare_dataset(dataset_folder, filter_caption=None, limit_size=1000):
     # files with features and labels are split due to ram limitations
-    # on generation it has to fit ram, and also on reading
+    # on generation it has to fit ram, and also on reading    
     files = os.listdir(dataset_folder)
     features = pd.DataFrame()
     for file in files:
@@ -55,12 +56,17 @@ def prepare_dataset(dataset_folder, filter_caption=None, limit_size=1000):
         print(f"Processing file '{file}'")    
         obj_features = pd.read_pickle(os.path.join(dataset_folder, file))
         obj_features["class"] = obj_features["class"].apply(lambda x: first_label+"-"+x)
-        if filter_caption is not None:
-            print(f"filter caption is on:{filter_caption}")
+        ## if caption filter is None, just use the data as is without any order
+        if filter_caption is None:
+            print(f"Caption preference is : None (shuffle data)")
+            obj_features = obj_features.sample(frac=1, random_state=22).reset_index(drop=True)
             obj_features = obj_features[obj_features["caption_filter"]==filter_caption]
         else:
             # order by caption filter to make sure there's caption_filter since only a few have
-            obj_features = obj_features.sort_values(by=['caption_filter'], ascending=False)
+            ## Ascneding TRUE Put caption_filter=False data first
+            ## Ascneding FALSE Put caption_filter=True data first
+            print(f"Caption preference is :{('caption first' if filter_caption else 'captions last')}")
+            obj_features = obj_features.sort_values(by=['caption_filter'], ascending=not filter_caption) 
             obj_features = obj_features.reset_index(drop=True)
         obj_features = obj_features[:limit_size]
         features = pd.concat([features, obj_features])
@@ -229,7 +235,7 @@ def run_experiments(train_features,
                                  tf.stack(train_y), 
                                  validation_data=(tf.stack(val_x),tf.stack(val_y)),
                                  epochs=epochs, 
-                                 batch_size=128, 
+                                 batch_size=100, 
                                  callbacks=[es],
                                  workers=6,
                                  use_multiprocessing=False,
@@ -243,10 +249,10 @@ def run_experiments(train_features,
             print("Evaluating model...")                
             test_scores[p] = clf_model.evaluate(tf.stack(test_x), 
                                                 tf.stack(test_y), 
-                                                batch_size=128)
-            #TODO: Evaluation per class using saved preds
-            preds = clf_model.predict(tf.stack(test_x), batch_size=128)
+                                                batch_size=len(test_labels))
+            preds = clf_model.predict(tf.stack(test_x), batch_size=len(test_labels))
             np.save(os.path.join(EXP_FOLDER, exp_name, f"preds_l-{layer}_o-{obj}_t-{strategy}.npy"), preds)
+            np.save(os.path.join(EXP_FOLDER, exp_name, f"test_labels_l-{layer}_o-{obj}_t-{strategy}.npy"), test_labels)
             y_pred = np.argmax(preds, axis=1)
             matrix = confusion_matrix(test_labels, y_pred)
             class_scores[p] = matrix.diagonal()/matrix.sum(axis=1)
@@ -262,20 +268,9 @@ def run_experiments(train_features,
     save_test_scores(class_scores, exp_name, f"{EXP_FOLDER}/{exp_name}/class_scores.csv", class_labels=unique_label_names)
 
 if __name__ == "__main__":
-    # dataset_folder = "features"
-    # for feat_group_name in os.listdir(dataset_folder):        
-    #     if "features-" in feat_group_name:
-    #         print(f"feature set: {feat_group_name}")
-    #         exp_name = f"exp_{feat_group_name[9:]}" 
-    #         os.makedirs(os.path.join(EXP_FOLDER, exp_name), exist_ok=True)
-    #         features, labels = prepare_dataset(f"{dataset_folder}/{feat_group_name}")
-    #         run_experiments(features=features, 
-    #                         labels=features["labels"], 
-    #                         exp_name=exp_name,
-    #                         models=["NN","SVM"])
-
     # dataset_folder = "connected_feat_caption_2/features-mask-4-main_thr-0-sec_thr-0/"    
     # dataset_folder = "features_dining-table/features-mask-4-main_thr-0-sec_thr-0/"
+    layers = [3, 4, 9, 10, 11]
     if len(sys.argv)>=3:
         exp_name = sys.argv[1]
         train_dataset = sys.argv[2]
@@ -284,16 +279,22 @@ if __name__ == "__main__":
         if len(sys.argv)>=4:
             test_dataset = sys.argv[3]
             print(f"Test dataset: {test_dataset}\n")
+            is_caption_selected_first = bool(sys.argv[4])
+            print(f"Caption fiter state: {is_caption_selected_first}\n")
+        if len(sys.argv)==6:
+            layers = sys.argv[5]
+            layers = f"[{layers}]"
+            layers = literal_eval(layers)
+            print(f"Layers used to extract tokens : {layers} \n")
 
-    # exp_name = f"exp_30-04_person_accessory"
-    # exp_name = f"exp_dining_{dataset_folder[31:-1]}_sgd2"    
     os.makedirs(os.path.join(EXP_FOLDER, exp_name), exist_ok=True)
-    train_features, train_labels = prepare_dataset(train_dataset, limit_size=1000)
-    test_features, test_labels = prepare_dataset(test_dataset, limit_size=100)
+    train_features, train_labels = prepare_dataset(train_dataset, filter_caption=is_caption_selected_first, limit_size=1001)
+    test_features, test_labels = prepare_dataset(test_dataset, filter_caption=is_caption_selected_first, limit_size=1000) # no limit practically
     print(f"\nLabels: {train_labels}")
     run_experiments(train_features=train_features, 
                     test_features=test_features, 
-                    unique_label_names = train_labels,     
+                    unique_label_names = train_labels,   
+                    layers=layers,
                     exp_name=exp_name,
                     epochs=200,
                     models=["NN"])
