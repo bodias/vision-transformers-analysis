@@ -1,5 +1,9 @@
 # vision-transformers-analysis
 
+Captioning model used in the analysis is based on the implementation by Kumar, Ankur in ["The Illustrated Image Captioning using transformers"](https://ankur3107.github.io/blogs/the-illustrated-image-captioning-using-transformers/).
+
+Model achieves BLEU@4 27.5 in the validation set of COCO (val2017).
+
 Current files and their usage:
 
 1. **coco_dataset_filtering.ipynb**: from COCO dataset, filter images containing specific *category_id* (instance annotations) or words in *caption* (caption annotations). Main function is called `filter_complex_images`.
